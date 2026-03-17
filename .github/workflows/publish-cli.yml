@@ -131,19 +131,13 @@ jobs:
       - name: Set version
         run: |
           VERSION="${{ inputs.version }}"
-          for pkg in npm/openusage npm/openusage-linux-x64 npm/openusage-linux-arm64 npm/openusage-darwin-x64 npm/openusage-darwin-arm64; do
-            (cd "$pkg" && npm version "$VERSION" --no-git-tag-version --allow-same-version)
+          for pkg_file in npm/openusage/package.json npm/openusage-linux-x64/package.json npm/openusage-linux-arm64/package.json npm/openusage-darwin-x64/package.json npm/openusage-darwin-arm64/package.json; do
+            tmp=$(mktemp)
+            jq --arg v "$VERSION" '.version = $v' "$pkg_file" > "$tmp" && mv "$tmp" "$pkg_file"
           done
           # Update optionalDependencies versions in root package
-          PKG_FILE="${GITHUB_WORKSPACE}/npm/openusage/package.json"
-          node -e "
-            const fs = require('fs');
-            const pkg = JSON.parse(fs.readFileSync('${PKG_FILE}', 'utf8'));
-            for (const dep of Object.keys(pkg.optionalDependencies || {})) {
-              pkg.optionalDependencies[dep] = '${VERSION}';
-            }
-            fs.writeFileSync('${PKG_FILE}', JSON.stringify(pkg, null, 2) + '\n');
-          "
+          tmp=$(mktemp)
+          jq --arg v "$VERSION" '.optionalDependencies |= with_entries(.value = $v)' npm/openusage/package.json > "$tmp" && mv "$tmp" npm/openusage/package.json
 
       # Verify all binaries are present
       - name: Verify artifacts
