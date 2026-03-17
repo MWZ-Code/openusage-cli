@@ -61,7 +61,15 @@ function findBinary() {
 }
 
 function main() {
+  const fs = require("fs");
   const binPath = findBinary();
+
+  // Ensure the binary is executable (npm publish doesn't preserve permissions)
+  try {
+    fs.chmodSync(binPath, 0o755);
+  } catch {
+    // Ignore — may fail on Windows or if already executable
+  }
 
   // Resolve plugins directory: bundled with the root package
   const pluginsDir = path.join(__dirname, "..", "plugins");
