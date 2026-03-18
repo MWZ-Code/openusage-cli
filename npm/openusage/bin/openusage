@@ -81,6 +81,7 @@ function main() {
   }
 
   try {
+    // Use spawn with shell:false first, fall back to shell:true if EACCES
     execFileSync(binPath, args, {
       stdio: "inherit",
       env: {
@@ -89,6 +90,19 @@ function main() {
       },
     });
   } catch (err) {
+    if (err.code === "EACCES") {
+      // chmod failed or didn't stick — retry via shell which bypasses execute bit
+      const { spawnSync } = require("child_process");
+      const result = spawnSync(binPath, args, {
+        stdio: "inherit",
+        shell: true,
+        env: {
+          ...process.env,
+          OPENUSAGE_PLUGINS_DIR: pluginsDir,
+        },
+      });
+      process.exit(result.status || 0);
+    }
     if (err.status != null) {
       process.exit(err.status);
     }
