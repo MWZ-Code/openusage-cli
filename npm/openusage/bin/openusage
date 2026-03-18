@@ -1,74 +1,33 @@
 #!/usr/bin/env node
 "use strict";
 
-const { execFileSync } = require("child_process");
+const { execFileSync, spawnSync } = require("child_process");
 const path = require("path");
-const os = require("os");
-
-const PLATFORM_PACKAGES = {
-  "linux-x64": "openusage-linux-x64",
-  "linux-arm64": "openusage-linux-arm64",
-  "darwin-x64": "openusage-darwin-x64",
-  "darwin-arm64": "openusage-darwin-arm64",
-};
-
-function getPlatformKey() {
-  const platform = os.platform();
-  const arch = os.arch();
-
-  // Normalize arch names
-  const archMap = { x64: "x64", arm64: "arm64" };
-  const normalizedArch = archMap[arch];
-
-  if (!normalizedArch) {
-    throw new Error(
-      `Unsupported architecture: ${arch}. openusage supports x64 and arm64.`
-    );
-  }
-
-  const key = `${platform}-${normalizedArch}`;
-  if (!PLATFORM_PACKAGES[key]) {
-    throw new Error(
-      `Unsupported platform: ${platform} ${arch}. openusage supports Linux and macOS on x64/arm64.`
-    );
-  }
-
-  return key;
-}
+const fs = require("fs");
 
 function findBinary() {
-  const key = getPlatformKey();
-  const pkg = PLATFORM_PACKAGES[key];
+  const binPath = path.join(__dirname, "openusage-bin");
 
-  // Try npm-installed package first
-  try {
-    const pkgDir = path.dirname(require.resolve(`${pkg}/package.json`));
-    const binPath = path.join(pkgDir, "bin", "openusage");
+  if (fs.existsSync(binPath)) {
     return binPath;
-  } catch {
-    // Fall back to sibling directory (local development / monorepo layout)
-    const siblingPath = path.join(__dirname, "..", "..", pkg, "bin", "openusage");
-    if (require("fs").existsSync(siblingPath)) {
-      return siblingPath;
-    }
-
-    throw new Error(
-      `Could not find the openusage binary for your platform (${key}).\n` +
-        `Make sure the optional dependency "${pkg}" is installed.\n` +
-        `Try: npm install ${pkg}`
-    );
   }
+
+  throw new Error(
+    "Could not find the openusage binary.\n" +
+      "The postinstall script may have failed to download it.\n" +
+      "Try reinstalling: npm install -g @mwz-code/openusage\n" +
+      "Or download manually from https://github.com/MWZ-Code/openusage-cli/releases"
+  );
 }
 
 function main() {
-  const fs = require("fs");
   const binPath = findBinary();
 
-  // Ensure the binary is executable (npm publish doesn't preserve permissions)
+  // Ensure the binary is executable
   try {
     fs.chmodSync(binPath, 0o755);
   } catch {
-    // Ignore — may fail on Windows or if already executable
+    // Ignore — may fail on read-only filesystems
   }
 
   // Resolve plugins directory: bundled with the root package
@@ -80,26 +39,19 @@ function main() {
     args.unshift("--plugins-dir", pluginsDir);
   }
 
+  const env = {
+    ...process.env,
+    OPENUSAGE_PLUGINS_DIR: pluginsDir,
+  };
+
   try {
-    // Use spawn with shell:false first, fall back to shell:true if EACCES
-    execFileSync(binPath, args, {
-      stdio: "inherit",
-      env: {
-        ...process.env,
-        OPENUSAGE_PLUGINS_DIR: pluginsDir,
-      },
-    });
+    execFileSync(binPath, args, { stdio: "inherit", env });
   } catch (err) {
     if (err.code === "EACCES") {
-      // chmod failed or didn't stick — retry via shell which bypasses execute bit
-      const { spawnSync } = require("child_process");
       const result = spawnSync(binPath, args, {
         stdio: "inherit",
         shell: true,
-        env: {
-          ...process.env,
-          OPENUSAGE_PLUGINS_DIR: pluginsDir,
-        },
+        env,
       });
       process.exit(result.status || 0);
     }

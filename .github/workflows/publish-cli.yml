@@ -8,13 +8,13 @@ on:
         required: true
         type: string
       dry_run:
-        description: "Dry run (skip npm publish)"
+        description: "Dry run (skip publish)"
         required: false
         type: boolean
         default: false
 
 permissions:
-  contents: read
+  contents: write
 
 env:
   CARGO_TERM_COLOR: always
@@ -28,17 +28,17 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
-            npm_pkg: openusage-linux-x64
+            artifact: openusage-linux-x64
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
-            npm_pkg: openusage-linux-arm64
+            artifact: openusage-linux-arm64
             cross: true
           - target: x86_64-apple-darwin
             os: macos-latest
-            npm_pkg: openusage-darwin-x64
+            artifact: openusage-darwin-x64
           - target: aarch64-apple-darwin
             os: macos-latest
-            npm_pkg: openusage-darwin-arm64
+            artifact: openusage-darwin-arm64
 
     runs-on: ${{ matrix.os }}
 
@@ -53,7 +53,6 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
-      # Linux ARM64 cross-compilation dependencies
       - name: Install cross-compilation tools (Linux ARM64)
         if: matrix.cross
         run: |
@@ -64,7 +63,6 @@ jobs:
           echo "CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
           echo "CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++" >> $GITHUB_ENV
 
-      # Linux x64 build dependencies
       - name: Install build dependencies (Linux x64)
         if: matrix.os == 'ubuntu-latest' && !matrix.cross
         run: |
@@ -74,20 +72,14 @@ jobs:
       - name: Build CLI binary
         run: cargo build -p openusage-cli --release --target ${{ matrix.target }}
 
-      - name: Prepare npm package
-        run: |
-          mkdir -p npm/${{ matrix.npm_pkg }}/bin
-          cp target/${{ matrix.target }}/release/openusage npm/${{ matrix.npm_pkg }}/bin/openusage
-          chmod +x npm/${{ matrix.npm_pkg }}/bin/openusage
-
-      - name: Upload artifact
+      - name: Upload binary artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.npm_pkg }}
-          path: npm/${{ matrix.npm_pkg }}
+          name: ${{ matrix.artifact }}
+          path: target/${{ matrix.target }}/release/openusage
 
-  publish:
-    name: Publish to npm
+  release:
+    name: Create GitHub Release & Publish npm
     needs: build
     runs-on: ubuntu-latest
 
@@ -102,22 +94,32 @@ jobs:
       # Download all platform binaries
       - uses: actions/download-artifact@v4
         with:
-          name: openusage-linux-x64
-          path: npm/openusage-linux-x64
-      - uses: actions/download-artifact@v4
-        with:
-          name: openusage-linux-arm64
-          path: npm/openusage-linux-arm64
-      - uses: actions/download-artifact@v4
-        with:
-          name: openusage-darwin-x64
-          path: npm/openusage-darwin-x64
-      - uses: actions/download-artifact@v4
-        with:
-          name: openusage-darwin-arm64
-          path: npm/openusage-darwin-arm64
+          path: artifacts
 
-      # Bundle plugins into the root package
+      # Create GitHub Release with binaries
+      - name: Create GitHub Release
+        if: ${{ !inputs.dry_run }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ inputs.version }}"
+          TAG="v${VERSION}"
+
+          # Rename artifacts for release
+          mkdir -p release-assets
+          for name in openusage-linux-x64 openusage-linux-arm64 openusage-darwin-x64 openusage-darwin-arm64; do
+            cp "artifacts/${name}/openusage" "release-assets/${name}"
+            chmod +x "release-assets/${name}"
+          done
+
+          # Create release (or update if tag exists)
+          gh release create "$TAG" \
+            --title "v${VERSION}" \
+            --generate-notes \
+            release-assets/* \
+            || gh release upload "$TAG" release-assets/* --clobber
+
+      # Bundle plugins
       - name: Bundle plugins
         run: |
           mkdir -p npm/openusage/plugins
@@ -127,43 +129,15 @@ jobs:
             cp -r "$plugin_dir" "npm/openusage/plugins/$plugin_name"
           done
 
-      # Set version in all package.json files
+      # Set version
       - name: Set version
         run: |
           VERSION="${{ inputs.version }}"
-          for pkg_file in npm/openusage/package.json npm/openusage-linux-x64/package.json npm/openusage-linux-arm64/package.json npm/openusage-darwin-x64/package.json npm/openusage-darwin-arm64/package.json; do
-            tmp=$(mktemp)
-            jq --arg v "$VERSION" '.version = $v' "$pkg_file" > "$tmp" && mv "$tmp" "$pkg_file"
-          done
-          # Update optionalDependencies versions in root package
           tmp=$(mktemp)
-          jq --arg v "$VERSION" '.optionalDependencies |= with_entries(.value = $v)' npm/openusage/package.json > "$tmp" && mv "$tmp" npm/openusage/package.json
+          jq --arg v "$VERSION" '.version = $v' npm/openusage/package.json > "$tmp" && mv "$tmp" npm/openusage/package.json
 
-      # Verify all binaries are present
-      - name: Verify artifacts
-        run: |
-          for pkg in openusage-linux-x64 openusage-linux-arm64 openusage-darwin-x64 openusage-darwin-arm64; do
-            if [ ! -f "npm/$pkg/bin/openusage" ]; then
-              echo "Missing binary in $pkg"
-              exit 1
-            fi
-            echo "OK: $pkg/bin/openusage ($(file npm/$pkg/bin/openusage))"
-          done
-
-      # Publish platform packages first, then root package
-      - name: Publish platform packages
-        if: ${{ !inputs.dry_run }}
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: |
-          for pkg in openusage-linux-x64 openusage-linux-arm64 openusage-darwin-x64 openusage-darwin-arm64; do
-            echo "Publishing $pkg..."
-            cd "npm/$pkg"
-            npm publish --access public
-            cd "$GITHUB_WORKSPACE"
-          done
-
-      - name: Publish root package
+      # Publish npm package
+      - name: Publish to npm
         if: ${{ !inputs.dry_run }}
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
@@ -175,6 +149,8 @@ jobs:
         if: ${{ inputs.dry_run }}
         run: |
           echo "DRY RUN — would have published:"
-          for pkg in openusage-linux-x64 openusage-linux-arm64 openusage-darwin-x64 openusage-darwin-arm64 openusage; do
-            echo "  - $(node -p "require('./npm/$pkg/package.json').name")@$(node -p "require('./npm/$pkg/package.json').version")"
-          done
+          echo "  GitHub Release: v${{ inputs.version }} with 4 platform binaries"
+          echo "  npm: @mwz-code/openusage@${{ inputs.version }}"
+          echo ""
+          echo "Artifacts:"
+          ls -la artifacts/*/
